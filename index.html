@@ -1,0 +1,95 @@
+<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,user-scalable=no"><title>PTT Radio</title>
+<style>body{font-family:system-ui,sans-serif;background:#111;color:#eee;margin:0;padding:16px;text-align:center;-webkit-user-select:none;user-select:none}
+input,button{font-size:18px;padding:10px;margin:6px;border-radius:8px;border:0}#go{background:#2a7;color:#fff}
+#ptt{width:220px;height:220px;border-radius:50%;background:#2a7;color:#fff;font-size:24px;margin:20px auto;display:block;touch-action:none;-webkit-touch-callout:none}
+#ptt.on{background:#d33}#ptt.busy{background:#555}ul{padding:0}li{list-style:none;padding:4px}.tk{color:#f55;font-weight:bold}#main{display:none}
+#count{font-size:42px;font-weight:bold;color:#4e9}#net{font-size:12px;color:#888}#unlock{display:none;background:#e90;color:#000}</style></head><body>
+<h2>📻 PTT Radio</h2>
+<div><span id=count>…</span><div>online in <b id=chlabel>#main</b></div></div><ul id=us></ul>
+<div id=login><input id=nm placeholder="Name or phone"><br><input id=chn placeholder="Channel" value="main"><br><button id=go>Join</button></div>
+<div id=main><h3 id=hd></h3><div id=st>Idle</div><button id=unlock>🔊 Tap to enable audio</button><button id=ptt>HOLD TO TALK</button><small>Desktop: hold Space</small></div>
+<div id=net>connecting…</div>
+<script src="https://unpkg.com/mqtt@5/dist/mqtt.min.js"></script>
+<script id=core>
+// ---- protocol core (also used by headless tests) ----
+var PTT_PREFIX='ptt-radio-66ab9178/';
+var BROKERS=['wss://public:public@public.cloud.shiftr.io','wss://broker.emqx.io:8084/mqtt','wss://broker.hivemq.com:8884/mqtt','wss://test.mosquitto.org:8081'];
+var HB_MS=5000,EXPIRE_MS=15000,FLOOR_TIMEOUT_MS=2500,CLAIM_GRACE_MS=700;
+function Radio(mqttLib,opts){var R=this;R.mqtt=mqttLib;R.ch=(opts.ch||'main').replace(/[^\w-]/g,'').slice(0,40)||'main';
+ R.id=Math.random().toString(36).slice(2,10);R.name=null;R.users={};R.floor=null;R.cb=opts.on||function(){};R.bi=0;R.brokers=opts.brokers||BROKERS;R.connect();}
+Radio.prototype.T=function(s){return PTT_PREFIX+this.ch+'/'+s};
+Radio.prototype.connect=function(){var R=this,url=R.brokers[R.bi%R.brokers.length],ok=false;
+ var c=R.c=R.mqtt.connect(url,{clientId:'ptt_'+R.id+'_'+Date.now()%1e6,clean:true,keepalive:20,reconnectPeriod:0,connectTimeout:8000,
+  will:{topic:R.T('presence/'+R.id),payload:'',retain:true,qos:0}});
+ c.on('connect',function(){ok=true;R.url=url;c.subscribe([R.T('presence/+'),R.T('floor'),R.T('audio')]);if(R.name)R.beat();R.cb('net',url)});
+ c.on('message',function(t,p){R.onMsg(t,p)});
+ c.on('error',function(){});
+ c.on('close',function(){if(R.closed)return;R.cb('net','disconnected');if(!ok)R.bi++;setTimeout(function(){c.end(true);R.connect()},ok?1500:300)});
+ if(!R.timer)R.timer=setInterval(function(){R.tick()},1000);};
+Radio.prototype.join=function(name){this.name=String(name).slice(0,40);this.beat();};
+Radio.prototype.beat=function(){var R=this;if(!R.name||!R.c.connected)return;R.lastBeat=Date.now();
+ R.c.publish(R.T('presence/'+R.id),JSON.stringify({id:R.id,name:R.name,ts:Date.now()}),{retain:true});};
+Radio.prototype.leave=function(){var R=this;R.release();if(R.c.connected)R.c.publish(R.T('presence/'+R.id),'',{retain:true});R.closed=true;clearInterval(R.timer);var c=R.c;setTimeout(function(){c.end()},200)};
+Radio.prototype.tick=function(){var R=this,now=Date.now(),ch=false;
+ if(R.name&&(!R.lastBeat||now-R.lastBeat>=HB_MS))R.beat();
+ for(var k in R.users)if(now-R.users[k].seen>EXPIRE_MS){delete R.users[k];ch=true}
+ if(R.floor&&now-R.floor.seen>FLOOR_TIMEOUT_MS){R.floor=null;ch=true}
+ if(R.floor&&R.floor.id===R.id&&R.talking)R.c.publish(R.T('floor'),JSON.stringify({t:'hb',id:R.id,name:R.name,ts:R.floor.ts}));
+ if(ch)R.emit()};
+Radio.prototype.list=function(){var a=[];for(var k in this.users)a.push(this.users[k]);return a.sort(function(x,y){return x.name<y.name?-1:1})};
+Radio.prototype.emit=function(){this.cb('state',{users:this.list(),floor:this.floor,me:this.id})};
+function beats(a,b){return a.ts<b.ts||(a.ts===b.ts&&(a.name+a.id)<(b.name+b.id))} // earliest ts, then name/id
+Radio.prototype.onMsg=function(t,p){var R=this,now=Date.now(),s=t.slice(PTT_PREFIX.length+R.ch.length+1);
+ if(s.indexOf('presence/')===0){var id=s.slice(9);if(!p.length){delete R.users[id];if(R.floor&&R.floor.id===id)R.floor=null}
+  else{try{var m=JSON.parse(p.toString());if(now-m.ts<EXPIRE_MS*4)R.users[id]={id:id,name:String(m.name).slice(0,40),seen:now}}catch(e){}}R.emit();return}
+ if(s==='floor'){var m;try{m=JSON.parse(p.toString())}catch(e){return}
+  if(m.t==='claim'||m.t==='hb'){var f=R.floor;
+   // accept if free, same holder, or racing claim that beats current one within grace window
+   if(!f||f.id===m.id||(m.t==='claim'&&now-f.got<CLAIM_GRACE_MS*3&&beats(m,f))){R.floor={id:m.id,name:m.name,ts:m.ts,seen:now,got:f&&f.id===m.id?f.got:now};}
+   else if(m.t==='hb'&&f&&f.id!==m.id&&beats(m,f)){R.floor={id:m.id,name:m.name,ts:m.ts,seen:now,got:now}}
+   if(R.users[m.id])R.users[m.id].seen=now;}
+  else if(m.t==='release'&&R.floor&&R.floor.id===m.id)R.floor=null;
+  R.emit();return}
+ if(s==='audio'){var b=p instanceof Uint8Array?p:new Uint8Array(p),n=b[0],id='';for(var i=1;i<=n;i++)id+=String.fromCharCode(b[i]);
+  if(R.floor&&R.floor.id===id&&id!==R.id){R.floor.seen=now;var pcm=Uint8Array.prototype.slice.call(b,1+n);R.cb('audio',new Int16Array(pcm.buffer,pcm.byteOffset,pcm.length>>1))}}};
+// claim floor; resolves true if we hold it after the race grace period
+Radio.prototype.claim=function(done){var R=this;if(R.floor&&R.floor.id!==R.id)return done(false);R.talking=true;var ts=Date.now();
+ R.floor={id:R.id,name:R.name,ts:ts,seen:Date.now(),got:Date.now()};R.c.publish(R.T('floor'),JSON.stringify({t:'claim',id:R.id,name:R.name,ts:ts}));R.emit();
+ setTimeout(function(){var ok=R.talking&&R.floor&&R.floor.id===R.id;if(!ok)R.talking=false;done(ok)},CLAIM_GRACE_MS)};
+Radio.prototype.release=function(){var R=this;R.talking=false;if(R.floor&&R.floor.id===R.id){R.floor=null;R.c.publish(R.T('floor'),JSON.stringify({t:'release',id:R.id}));R.emit()}};
+Radio.prototype.sendAudio=function(i16){var R=this;if(!R.talking||!R.floor||R.floor.id!==R.id||!R.c.connected)return false;
+ var n=R.id.length,b=new Uint8Array(1+n+i16.byteLength);b[0]=n;for(var i=0;i<n;i++)b[1+i]=R.id.charCodeAt(i);
+ b.set(new Uint8Array(i16.buffer,i16.byteOffset,i16.byteLength),1+n);R.c.publish(R.T('audio'),typeof Buffer!=='undefined'&&!this.browser?Buffer.from(b):b);return true};
+if(typeof module!=='undefined')module.exports={Radio:Radio};
+</script>
+<script>
+var RATE=12000,radio,ac,stream,proc,playT=0,holding=false,granted=false,st0={users:[],floor:null};
+var q=new URLSearchParams(location.search);nm.value=localStorage.nm||'';chn.value=q.get('ch')||localStorage.ch||'main';
+function esc(s){return s.replace(/[&<]/g,function(c){return c=='&'?'&amp;':'&lt;'})}
+function render(){var f=st0.floor;count.textContent=st0.users.length;chlabel.textContent='#'+radio.ch;
+ us.innerHTML=st0.users.map(function(u){var t=f&&f.id===u.id;return '<li class="'+(t?'tk':'')+'">'+(t?'🎙️ ':'👤 ')+esc(u.name)+(u.id===radio.id?' (you)':'')+'</li>'}).join('')||'<li>Nobody yet</li>';
+ var busy=f&&f.id!==radio.id;ptt.className=granted?'on':busy?'busy':'';ptt.textContent=granted?'TALKING':busy?'BUSY':'HOLD TO TALK';
+ st.textContent=granted?'Transmitting…':f&&busy?f.name+' is talking':holding?'Claiming…':'Idle'}
+function start(ch){if(radio)radio.leave();radio=new Radio(mqtt,{ch:ch,on:function(k,v){if(k==='state'){st0=v;if(granted&&(!v.floor||v.floor.id!==radio.id)){granted=false}render()}
+ else if(k==='audio')play(v);else if(k==='net')net.textContent='relay: '+v+' · topic '+PTT_PREFIX+radio.ch}});radio.browser=true;render()}
+start(chn.value);chn.onchange=function(){if(main.style.display!='block')start(chn.value)};
+go.onclick=async function(){var me=nm.value.trim();if(!me)return alert('Enter name or phone');localStorage.nm=me;localStorage.ch=chn.value;
+ if(radio.ch!==(chn.value.replace(/[^\w-]/g,'')||'main'))start(chn.value);
+ ac=new (window.AudioContext||window.webkitAudioContext)();unlockAudio();
+ try{stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}})}catch(e){alert('Mic unavailable: '+e.message+' (you can still listen)')}
+ if(stream){var src=ac.createMediaStreamSource(stream);proc=ac.createScriptProcessor(4096,1,1);var mute=ac.createGain();mute.gain.value=0;src.connect(proc);proc.connect(mute);mute.connect(ac.destination);
+  proc.onaudioprocess=function(e){if(!granted)return;var i=e.inputBuffer.getChannelData(0),r=ac.sampleRate/RATE,n=Math.floor(i.length/r),o=new Int16Array(n);
+   for(var k=0;k<n;k++)o[k]=Math.max(-1,Math.min(1,i[Math.floor(k*r)]))*32767;radio.sendAudio(o)}}
+ login.style.display='none';main.style.display='block';hd.textContent='#'+radio.ch+' — '+me;radio.join(me);
+ setInterval(function(){unlock.style.display=ac.state==='running'?'none':'inline-block'},1000)};
+function unlockAudio(){ac.resume();var b=ac.createBuffer(1,1,22050),s=ac.createBufferSource();s.buffer=b;s.connect(ac.destination);s.start(0)} // iOS unlock
+unlock.onclick=unlockAudio;
+function play(a){if(!ac)return;var b=ac.createBuffer(1,a.length,RATE),d=b.getChannelData(0);for(var i=0;i<a.length;i++)d[i]=a[i]/32768;
+ var s=ac.createBufferSource();s.buffer=b;s.connect(ac.destination);var now=ac.currentTime;if(playT<now||playT>now+1)playT=now+0.15;s.start(playT);playT+=b.duration}
+function down(e){e&&e.preventDefault();if(holding)return;unlockAudio();holding=true;render();radio.claim(function(ok){granted=ok&&holding;if(ok&&!holding)radio.release();if(!ok)holding=holding;render()})}
+function up(e){e&&e.preventDefault();if(!holding)return;holding=false;granted=false;radio.release();render()}
+ptt.addEventListener('pointerdown',function(e){ptt.setPointerCapture(e.pointerId);down(e)});['pointerup','pointercancel'].forEach(function(t){ptt.addEventListener(t,up)});
+ptt.oncontextmenu=function(e){e.preventDefault()};
+onkeydown=function(e){if(e.code=='Space'&&main.style.display=='block'&&!e.repeat)down(e)};onkeyup=function(e){if(e.code=='Space')up(e)};
+addEventListener('pagehide',function(){radio.leave()});
+</script></body></html>

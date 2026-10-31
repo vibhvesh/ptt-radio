@@ -1,7 +1,7 @@
 const fs=require('fs'),mqtt=require('mqtt');
-const src=fs.readFileSync('index.html','utf8').match(/<script id=core>([\s\S]*?)<\/script>/)[1];
+const src=fs.readFileSync("radio.html",'utf8').match(/<script id=core>([\s\S]*?)<\/script>/)[1];
 const m={exports:{}};new Function('module','Buffer',src)(m,Buffer);const {Radio,distKm}=m.exports;
-const rsrc=fs.readFileSync('index.html','utf8').match(/<script id=rec>([\s\S]*?)<\/script>/)[1];const m2={exports:{}};new Function('module',rsrc)(m2);const {Recorder,buildWav}=m2.exports;
+const rsrc=fs.readFileSync("radio.html",'utf8').match(/<script id=rec>([\s\S]*?)<\/script>/)[1];const m2={exports:{}};new Function('module',rsrc)(m2);const {Recorder,buildWav}=m2.exports;
 const ch='test'+Date.now()%1e5,sleep=t=>new Promise(r=>setTimeout(r,t));
 const mk=(n)=>{const s={audio:0,last:null,rec:new Recorder(12000)};var r;r=new Radio(mqtt,{ch,brokers:process.env.B?[process.env.B]:undefined,on:(k,v)=>{if(k=='state')s.last=v;if(k=='audio'){s.audio+=v.length;const f=r.floor;if(f){const fu=r.users[f.id];s.rec.feed(f.id,f.name,v,false,undefined,fu&&fu.loc)}}if(k=='state'&&s.pf&&(!v.floor||v.floor.id!==s.pf.id))s.rec.end();if(k=='state')s.pf=v.floor;if(k=='net')console.log(n,'net',v)}});r.s=s;return r};
 const ok=(c,msg)=>{console.log(c?'PASS':'FAIL',msg);if(!c)process.exitCode=1};

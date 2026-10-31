@@ -1,11 +1,10 @@
-# 📻 PTT Radio
+# Boondockecho Virtual Radio
 
-Static push-to-talk walkie-talkie in one `index.html`, hosted on GitHub Pages. No backend: browsers talk through a free public MQTT-over-WebSocket broker (shiftr.io public, with EMQX/HiveMQ/Mosquitto as fallbacks) using mqtt.js from a CDN.
+Browser push-to-talk radio with a ham-transceiver look: LCD channel display, S/VU meter (TX & RX), TX/RX LEDs, glowing PTT (green idle / red TX / amber BUSY), callsign chips, and a session replay log.
 
-- Open the page to see who's online in the channel right now (even before joining). Use `?ch=name` to preselect a channel.
-- Type a name or phone number and join. Hold the big button, or Spacebar, to talk. Only one person talks at a time.
-- Presence: retained heartbeat every 5s, expires after 15s, last-will clears it on disconnect.
-- Floor: claim message; races go to the earliest timestamp, then the lower name+id; auto-release after 2.5s of silence from the talker.
-- Audio: 12 kHz 16-bit mono PCM chunks as binary MQTT payloads.
+Live: https://vibhvesh.github.io/ptt-radio/ — use `?ch=<name>` for a channel.
 
-⚠️ Public broker: no privacy (anyone who knows the topic can listen), no uptime guarantee, rate limits possible.
+- Transport: MQTT over WebSockets (shiftr.io public broker primary, fallbacks), topic prefix `ptt-radio-66ab9178/<channel>/`
+- Presence heartbeats + last-will, floor control (one talker at a time), 16-bit PCM @ 12 kHz
+- Session log: each transmission (yours and others') kept in memory as a WAV blob (last 50 / ~20 min), cleared when the tab closes
+- Tests: `npm i && node test.js`

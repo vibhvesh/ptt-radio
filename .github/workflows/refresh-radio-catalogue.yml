@@ -1,5 +1,10 @@
 name: Refresh PTT Radio Catalogue
 on:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/refresh_catalogue.py"
+      - ".github/workflows/refresh-radio-catalogue.yml"
   schedule:
     - cron: "17,47 * * * *"
   workflow_dispatch:
